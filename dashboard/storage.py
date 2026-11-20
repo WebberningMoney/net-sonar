@@ -158,6 +158,20 @@ class Storage:
             return self._db.execute("SELECT ts, rtt FROM samples WHERE target=? AND ts>=? ORDER BY ts",
                                     (target, since_ts)).fetchall()
 
+    def last_sample_ts(self):
+        """最後一筆原始量測的時間（秒）；沒有資料時回傳 None。用在「停止量測時，畫面停在停止前」。"""
+        with self._lock:
+            row = self._db.execute("SELECT MAX(ts) FROM samples").fetchone()
+        return row[0] if row and row[0] is not None else None
+
+    def last_values(self) -> dict:
+        """每個目標「最後一筆」的量測結果 {目標: 延遲或 None}。打開程式時（還沒開始量測）卡片的大數字用它。"""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT s.target, s.rtt FROM samples s JOIN (SELECT target, MAX(ts) AS mt FROM samples GROUP BY target) m "
+                "ON s.target = m.target AND s.ts = m.mt").fetchall()
+        return {t: r for t, r in rows}
+
     # ---- 清除紀錄（使用者在網頁上按「清除」時）----
     def clear_samples(self) -> int:
         """刪掉所有量測資料（每秒原始資料＋每分鐘平均）。回傳刪掉幾筆原始資料。"""

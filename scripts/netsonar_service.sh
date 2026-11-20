@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
-# netsonar_service.sh —— 把 NetSonar 安裝成「開機自動在背景執行」的服務（macOS LaunchAgent）。
+# netsonar_service.sh —— 安裝／移除 NetSonar，以及在背景打開／結束它（交給 macOS 的 launchd 管理）。
 #   用法：netsonar_service.sh install | uninstall [--purge] | start | stop | status
-# 安裝時也會在「應用程式」放一個 NetSonar 圖示：點它＝確定背景服務在跑，然後打開儀表板。
+# 安裝時會在「應用程式」放一個 NetSonar 圖示：點它＝打開 NetSonar（如果還沒開），然後打開儀表板網頁。
+#
+# 💡 登入電腦時「不會」自動啟動：
+#   launchd 只會在登入時自動載入放在 ~/Library/LaunchAgents 裡的設定檔。我們的設定檔放在
+#   ~/Library/Application Support/NetSonar/，所以只有你點 NetSonar 圖示時才會載入、啟動它。
+#   設定檔裡也沒有 KeepAlive（自動重開），結束就是結束（按「結束 NetSonar」、關掉網頁約 1 分鐘後、登出或關機）。
+#   舊版曾放在 LaunchAgents（登入時自動啟動），重新安裝時會自動移除。
 # 為什麼要「複製一份」到 ~/Library/Application Support？
 #   macOS 的隱私保護不讓背景程式讀取「桌面／文件」資料夾，直接從桌面執行會被擋；
 #   所以安裝時把程式複製到系統允許的位置，歷史資料與設定也放在那裡的 data/。
@@ -13,7 +19,8 @@ HOME_DIR="${NETSONAR_HOME:-$HOME}"
 BASE="$HOME_DIR/Library/Application Support/NetSonar"
 APP="$BASE/app"; DATA="$BASE/data"
 LABEL="com.netsonar.dashboard"
-PLIST="$HOME_DIR/Library/LaunchAgents/$LABEL.plist"
+PLIST="$BASE/$LABEL.plist"                                   # 不放 LaunchAgents → 登入時不會自動載入
+OLD_PLIST="$HOME_DIR/Library/LaunchAgents/$LABEL.plist"      # 舊版的位置（登入時自動啟動），安裝時移除
 LOG="$HOME_DIR/Library/Logs/NetSonar.log"
 DRY="${NETSONAR_DRYRUN:-0}"
 UIDN="$(id -u)"
@@ -43,18 +50,20 @@ build_launcher() {   # $1 = 儀表板網址
 PL
   cat > "$LAUNCHER/Contents/MacOS/NetSonar" <<'LA'
 #!/bin/bash
-# NetSonar 啟動器：確定背景服務在執行，然後用瀏覽器打開儀表板。
+# NetSonar 啟動器：NetSonar 還沒開就把它打開（交給 macOS 的 launchd），然後用瀏覽器打開儀表板。
+# 打開後不會自動量測，要在網頁按「開始量測」；關掉網頁約 1 分鐘後 NetSonar 會自動結束。
 LABEL="com.netsonar.dashboard"
-PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+PLIST="$HOME/Library/Application Support/NetSonar/$LABEL.plist"
 URL="__URL__"
 alive() { /usr/bin/curl -fs --max-time 2 "$URL/api/health" >/dev/null 2>&1; }
 say() { /usr/bin/osascript -e "display dialog \"$1\" with title \"NetSonar\" buttons {\"好\"} default button 1" >/dev/null 2>&1; }
 if ! alive; then
   if [ ! -f "$PLIST" ]; then
-    say "找不到 NetSonar 的背景服務。請打開 net-sonar 資料夾，重新雙擊「安裝.command」。"; exit 1
+    say "找不到 NetSonar 的設定。請打開 net-sonar 資料夾，重新雙擊「安裝.command」。"; exit 1
   fi
   U="$(/usr/bin/id -u)"
-  /bin/launchctl bootstrap "gui/$U" "$PLIST" 2>/dev/null || /bin/launchctl kickstart "gui/$U/$LABEL" 2>/dev/null
+  # 還沒載入 → 載入（設定檔裡寫了「載入就啟動」）；已載入但沒在跑或沒回應 → 重新啟動
+  /bin/launchctl bootstrap "gui/$U" "$PLIST" 2>/dev/null || /bin/launchctl kickstart -k "gui/$U/$LABEL" 2>/dev/null
   for _ in $(/usr/bin/seq 1 30); do alive && break; /bin/sleep 0.5; done
 fi
 if alive; then /usr/bin/open "$URL"
@@ -78,7 +87,7 @@ remove_launcher() {
 start_service() {
   [ -f "$PLIST" ] || { echo "尚未安裝，請先雙擊「安裝.command」。"; exit 1; }
   [ "$DRY" = "1" ] && return 0
-  launchctl bootstrap "gui/$UIDN" "$PLIST" 2>/dev/null || launchctl kickstart "gui/$UIDN/$LABEL" 2>/dev/null || launchctl load "$PLIST"
+  launchctl bootstrap "gui/$UIDN" "$PLIST" 2>/dev/null || launchctl kickstart -k "gui/$UIDN/$LABEL" 2>/dev/null || launchctl load "$PLIST"
 }
 
 find_python() {
@@ -93,14 +102,23 @@ find_python() {
 
 stop_service() {
   [ "$DRY" = "1" ] && return 0
-  launchctl bootout "gui/$UIDN/$LABEL" >/dev/null 2>&1 || launchctl unload "$PLIST" >/dev/null 2>&1 || true
+  launchctl bootout "gui/$UIDN/$LABEL" >/dev/null 2>&1 || launchctl unload "$PLIST" >/dev/null 2>&1 \
+    || launchctl unload "$OLD_PLIST" >/dev/null 2>&1 || true
+}
+
+remove_old_autostart() {
+  if [ -f "$OLD_PLIST" ]; then
+    rm -f "$OLD_PLIST"
+    echo "🧹 已移除舊版的「登入電腦時自動啟動」設定"
+  fi
 }
 
 install() {
   PY="$(find_python)" || { echo "❌ 找不到 Python 3.10 以上。請先安裝（例如到 python.org 下載，或執行 brew install python），再重新雙擊安裝。"; exit 1; }
   echo "🐍 使用 Python：$PY"
   stop_service
-  mkdir -p "$APP" "$DATA" "$(dirname "$PLIST")" "$(dirname "$LOG")"
+  remove_old_autostart
+  mkdir -p "$APP" "$DATA" "$(dirname "$LOG")"
 
   echo "📁 複製程式到 $APP"
   if command -v rsync >/dev/null 2>&1; then
@@ -134,7 +152,6 @@ install() {
     <key>NETSONAR_SERVICE</key><string>1</string>
   </dict>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>$LOG</string>
   <key>StandardErrorPath</key><string>$LOG</string>
 </dict></plist>
@@ -153,9 +170,10 @@ PL
     sleep 1
   done
   if curl -fs "$URL/api/health" >/dev/null 2>&1; then
-    echo "✅ 安裝完成！NetSonar 已在背景執行，之後開機會自動啟動。"
-    echo "   打開方式：點「應用程式」（或 Launchpad）裡的 NetSonar，也可以把它拖到 Dock。"
-    echo "   網址：$URL （也可以加入瀏覽器書籤）"
+    echo "✅ 安裝完成！"
+    echo "   之後要用：點「應用程式」（或 Launchpad）裡的 NetSonar，也可以把它拖到 Dock。"
+    echo "   登入電腦時不會自動啟動；打開後要在網頁按「開始量測」才會開始量。"
+    echo "   關掉網頁約 1 分鐘後，NetSonar 會自動結束。"
     open "$URL" 2>/dev/null || true
   else
     echo "⚠️ 服務已安裝但還沒回應。請看記錄檔：$LOG"
@@ -165,7 +183,7 @@ PL
 
 uninstall() {
   stop_service
-  rm -f "$PLIST"
+  rm -f "$PLIST" "$OLD_PLIST"
   rm -rf "$APP"
   remove_launcher
   if [ "${1:-}" = "--purge" ]; then rm -rf "$BASE" "$LOG"; echo "🗑️ 已移除服務、程式、歷史資料與設定。"
@@ -180,8 +198,8 @@ status() {
 case "${1:-}" in
   install) install ;;
   uninstall) shift; uninstall "$@" ;;
-  start) start_service; echo "▶️ 已啟動 NetSonar 背景服務。" ;;
-  stop) stop_service; echo "⏹ 已停止 NetSonar 背景服務（下次登入或打開 NetSonar App 會再啟動）。" ;;
+  start) start_service; echo "▶️ 已打開 NetSonar（要在網頁按「開始量測」才會開始量）。" ;;
+  stop) stop_service; echo "⏹ 已結束 NetSonar（之後點「應用程式」裡的 NetSonar 再打開）。" ;;
   status) status ;;
   *) echo "用法：$0 install | uninstall [--purge] | start | stop | status"; exit 2 ;;
 esac

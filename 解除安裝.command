@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 雙擊這個檔案即可移除 NetSonar 的背景服務。
+# 雙擊這個檔案即可移除 NetSonar（程式、「應用程式」裡的圖示；可選擇是否一併刪除歷史資料與設定）。
 cd "$(dirname "$0")"
 echo "═══ NetSonar 解除安裝 ═══"
 read -r -p "是否同時刪除歷史資料與設定？(y/N) " a

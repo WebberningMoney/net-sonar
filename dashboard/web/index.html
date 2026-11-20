@@ -14,6 +14,10 @@ nav{margin-left:auto;display:flex;gap:4px} nav button{background:none;border:0;c
 nav button.on{background:#17305a;color:#fff}
 main{max-width:1180px;margin:0 auto;padding:18px 24px 48px} section{display:none} section.on{display:block}
 .banner{padding:10px 14px;border-radius:8px;margin-bottom:12px;background:#fff7ed;border:1px solid #fed7aa;color:#9a3412}
+.banner.pause{background:#eef4fb;border-color:#c7d7ea;color:#1e3a5f;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+body.paused #live .cards,body.paused #live .advice,body.paused #chart{opacity:.72}   /* 停止量測：畫面停格，淡一點表示「不是現況」 */
+.stale-note{display:none;color:#b45309;font-size:12px;margin-bottom:6px}body.offline .stale-note{display:block}body.offline #measurebar{display:none}
+.mstate{font-size:15px;font-weight:600;margin-bottom:8px}.mstate.on{color:#16a34a}.mstate.off{color:#1e3a5f}
 .diag{padding:12px 16px;border-radius:10px;background:var(--card);border:1px solid var(--line);margin-bottom:14px;border-left:5px solid var(--mute)}
 .advice{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 16px;margin-bottom:12px;border-left:5px solid var(--mute)}
 .advice.ok{border-left-color:var(--ok)}.advice.warn{border-left-color:var(--warn)}.advice.bad{border-left-color:var(--bad)}
@@ -52,6 +56,7 @@ details.how{border-top:1px solid var(--line);padding:8px 0}details.how summary{c
 <nav><button data-t="live" class="on">即時</button><button data-t="hist">歷史</button><button data-t="test">定時測試</button><button data-t="trace">路徑分析</button><button data-t="set">設定</button><button data-t="info">說明</button></nav></header>
 <main>
 <div id="offbar"></div>
+<div id="measurebar"></div>
 <section id="live" class="on">
   <div id="busybar"></div><div id="vpnbar"></div>
   <div id="diag" class="advice"></div>
@@ -118,11 +123,17 @@ details.how{border-top:1px solid var(--line);padding:8px 0}details.how summary{c
   <div class="hint">設定會保存在這台電腦，更新程式時不會被覆蓋。按「恢復預設」可回到程式內建的設定。<br>「匯出設定」會把<b>已儲存</b>的設定存成一個檔案（還沒按「儲存設定」的修改不會包含在內）；「匯入設定」可以把之前匯出的檔案讀回來，也可以拿到另一台電腦使用。</div>
 </section>
 <section id="info">
+  <div class="panel"><h3>量測開關</h3>
+    <div id="mstate" class="mstate">讀取中…</div>
+    <div class="row"><button class="btn pri" data-measure="start">▶ 開始量測</button><button class="btn" data-measure="stop">⏸ 停止量測</button></div>
+    <div class="hint">打開 NetSonar 時<b>不會</b>自動量測，要按「開始量測」。<br>
+      停止量測：不再量測、不發通知；網頁照常可以看資料、下載 CSV、清除紀錄、改設定。<br>
+      網頁要開著才會繼續量測：<b>關掉網頁約 1 分鐘後，NetSonar 會自動結束</b>（定時測試進行中會等測試結束）。</div></div>
   <div class="panel"><h3>NetSonar 怎麼檢測你的網路</h3>
     <div class="hint">想知道畫面上的數字和建議是怎麼來的，點開下面的項目。</div>
     <details class="how" open><summary>① 怎麼量？</summary><div>
       像「對著山谷喊一聲，聽回音多久回來」：NetSonar 每隔幾秒，對每個監測目標送出一個很小的測試訊號（就是電腦內建的 <code>ping</code>），記下多久收到回應、有沒有收到。
-      <ul><li>各個目標的時間是錯開的，不會同一瞬間一起送。</li><li>除了你設定的目標，還會自動找出<b>家裡的路由器</b>一起量。這是判斷「問題在家裡還是外面」的關鍵。</li><li>目前的設定：<span id="how_now">讀取中…</span></li></ul></div></details>
+      <ul><li>各個目標的時間是錯開的，不會同一瞬間一起送。</li><li>除了你設定的目標，還會自動找出<b>家裡的路由器</b>一起量。這是判斷「問題在家裡還是外面」的關鍵。</li><li>只有在「量測中」才會量；打開 NetSonar 時要先按「開始量測」。目前：<span id="how_now">讀取中…</span></li></ul></div></details>
     <details class="how"><summary>② 數字怎麼算？</summary><div><ul>
       <li><b>平均</b>：最近 5 分鐘所有回應時間的平均。</li>
       <li><b>慢的時候</b>：把回應時間由快排到慢，100 次裡有 95 次比它快的那個數字。比平均更接近你「感覺到卡」的時候。</li>
@@ -134,20 +145,21 @@ details.how{border-top:1px solid var(--line);padding:8px 0}details.how summary{c
     <details class="how"><summary>④ 怎麼判斷問題出在哪一段？</summary><div>比較「路由器」和「外面的目標」：
       <ul><li>連路由器都不穩 → 問題偏向<b>你家裡</b>（Wi-Fi、路由器、這台電腦）。</li><li>路由器很穩，但一半以上的外部目標不穩 → 問題偏向<b>家以外</b>（網路公司或更遠的地方）。</li><li>只有少數目標不穩 → 多半是<b>那幾個目標自己</b>的問題。</li></ul>
       「抖動」那一段還會看延遲突然變高（尖峰）多久來一次、有沒有固定規律，再提出可以試試的做法。這些都是<b>推測</b>，不是鑑定。</div></details>
-    <details class="how"><summary>⑤ 什麼時候會通知我？</summary><div>連續好幾次沒有回應、最近 1 分鐘丟包太多、或最近 1 分鐘「慢的時候」太慢，就會跳出通知。同一類問題在一段時間內只通知一次；三個以上目標同時出事會合併成一則。門檻都可以在「設定」頁調整。</div></details>
+    <details class="how"><summary>⑤ 什麼時候會通知我？</summary><div>連續好幾次沒有回應、最近 1 分鐘丟包太多、或最近 1 分鐘「慢的時候」太慢，就會跳出通知（只有在「量測中」才會通知）。同一類問題在一段時間內只通知一次；三個以上目標同時出事會合併成一則。門檻都可以在「設定」頁調整。<br>如果量測中你把網頁關掉，NetSonar 約 1 分鐘後會自動結束，也會發一則通知告訴你量測已經停止。</div></details>
     <details class="how"><summary>⑥ 資料存多久？會傳到哪裡？</summary><div>所有量測結果只存在這台電腦：每秒的原始資料保留 24 小時，每分鐘的平均保留 90 天，測試報告保留到你刪除為止。<br>
       會對外連線的只有：你設定的監測目標與路由器（ping）、<code>ipinfo.io</code>（查對外 IP、DNS 服務商、路徑分析每一站的大約位置；可在「設定」頁關閉），以及你按下按鈕時才執行的下載測速（<code>speed.cloudflare.com</code>）與路徑分析。</div></details>
     <details class="how"><summary>⑦ 一直開著，會影響電腦或被當成網路攻擊嗎？</summary><div><ul>
       <li><b>流量很小</b>：以 9 個目標、每秒量一次為例，來回合計約每秒 1.5 KB，一天約 130 MB。家用寬頻感覺不到；但用手機熱點時會算進流量。</li>
       <li><b>被當成攻擊的機會很低</b>：每秒一次就是電腦內建 ping 的預設頻率；預設目標都是 Google、Cloudflare、中華電信這類公共服務，本來就承受非常大量的連線。它們頂多會限制 ping 的回應速度（畫面上會變成少量丟包）。</li>
       <li><b>建議</b>：不要把小型網站或公司內部主機加進監測目標；想更保守，可以到「設定」頁把「每隔幾秒量一次」調成 2～5 秒。</li>
-      <li><b>對電腦</b>：CPU 負擔很低；筆電用電池時會多耗一點電。讀取 Wi-Fi 詳細資訊時（預設每 5 分鐘）系統會掃描周圍網路，延遲可能短暫跳一下。</li></ul></div></details>
+      <li><b>對電腦</b>：CPU 負擔很低；筆電用電池時會多耗一點電。NetSonar 只在你打開時執行：登入電腦時不會自動啟動，關掉網頁約 1 分鐘後會自動結束。讀取 Wi-Fi 詳細資訊時（量測中預設每 5 分鐘）系統會掃描周圍網路，延遲可能短暫跳一下</li></ul></div></details>
   </div>
-  <div class="panel"><h3>運作狀態 <small class="hint">（NetSonar 自己有沒有正常運作？分辨「網路不穩」還是「電腦太忙、量測被拖慢」）</small></h3><div id="ehealth" class="hint">讀取中…</div></div>
-  <div class="panel"><h3>關於這個程式</h3><div id="about" class="hint">讀取中…</div>
-    <div class="row" style="margin-top:8px"><button class="btn" id="quit">⏻ 停止 NetSonar</button><button class="btn danger" data-clear="all" data-label="所有紀錄（量測、警示與事件、測試報告、下載測速、路徑分析）">🗑 清除所有紀錄</button></div>
+  <div class="panel"><h3>運作狀態 <small class="hint">（NetSonar 自己有沒有正常運作？分辨「網路不穩」還是「電腦太忙、量測被拖慢」）</small></h3><div class="stale-note">⚠️ NetSonar 目前沒有在執行，以下是最後一次讀到的資料。</div><div id="ehealth" class="hint">讀取中…</div></div>
+  <div class="panel"><h3>關於這個程式</h3><div class="stale-note">⚠️ NetSonar 目前沒有在執行，以下是最後一次讀到的資料。</div><div id="about" class="hint">讀取中…</div>
+    <div class="row" style="margin-top:8px"><button class="btn" id="quit">⏻ 結束 NetSonar</button><button class="btn danger" data-clear="all" data-label="所有紀錄（量測、警示與事件、測試報告、下載測速、路徑分析）">🗑 清除所有紀錄</button></div>
     <div class="hint">換到不同的環境測試（例如換了路由器、搬到別的地方）之前，可以先「清除所有紀錄」，新舊資料才不會混在一起。你的設定（監測目標、警示門檻）不會被清除。</div>
-    <div class="hint">關掉瀏覽器<b>不會</b>停止量測，NetSonar 會繼續在背景記錄並在網路變差時通知你。按上面的按鈕才會真的停止；之後打開「應用程式」裡的 NetSonar（或下次登入電腦）就會再啟動。想完全移除請雙擊 <code>解除安裝.command</code>。</div></div>
+    <div class="hint"><b>結束 NetSonar</b>：完全關閉程式，不再量測，網頁上的按鈕（包括清除紀錄）也無法使用；進行中的定時測試會先結束並保存報告。之後要再用，請點「應用程式」裡的 NetSonar。<br>
+      關掉網頁約 1 分鐘後也會自動結束；登入電腦時不會自動啟動。想完全移除請雙擊 <code>解除安裝.command</code>。</div></div>
 </section>
 <section id="trace">
   <div class="panel"><h3>路徑分析（Traceroute）<span class="acts"><a class="btn sm" id="tcsv" href="#" style="display:none" title="下載成表格檔，可用 Excel／Numbers 打開">⬇ 下載 CSV</a><button class="btn sm danger" data-clear="trace" data-label="路徑分析結果" title="清除後無法復原">🗑 清除</button></span></h3>
@@ -198,12 +210,36 @@ const ti=k=>GL[k]?`<span class="i" tabindex="0" data-g="${k}">ⓘ</span>`:"";
   document.addEventListener("focusout",hide);
   document.addEventListener("click",e=>{const el=e.target.closest&&e.target.closest(".i");if(el)(cur===el?hide():show(el));else hide();});})();
 const setH=(el,html)=>{if(el._html===html)return false;el._html=html;el.innerHTML=html;return true;};
-let envOpen=false, stopped=false;
+let envOpen=false, quitted=false, quitAt=0;
+let measure={measuring:true,stopped_at:null,test_running:false};   // 量測中／停止量測（見 applyMeasure）
 const lvIcon={ok:"🟢",warn:"🟡",bad:"🔴",info:"ℹ️"};
+/* ---------- 開始／停止量測 ---------- */
+const whenTxt=ts=>{const d=new Date(ts*1000),n=new Date();const t=d.toLocaleTimeString("zh-TW",{hour12:false,hour:"2-digit",minute:"2-digit"});
+  return d.toDateString()===n.toDateString()?t:`${d.getMonth()+1}/${d.getDate()} ${t}`;};
+function applyMeasure(m){measure=m;const on=m.measuring;
+  document.body.classList.toggle("paused",!on);
+  setH($("#measurebar"),on?"":`<div class="banner pause">⏸ <b>目前沒有在量測</b><span>${m.stopped_at?`畫面是停止前（${whenTxt(m.stopped_at)}）的資料。`:"還沒有量測資料。"}</span><button class="btn pri sm" data-measure="start">▶ 開始量測</button></div>`);
+  $("#mstate").className="mstate "+(on?"on":"off");
+  $("#mstate").textContent=on?"● 量測中":"⏸ 目前沒有在量測"+(m.stopped_at?`（畫面停在 ${whenTxt(m.stopped_at)}）`:"");
+  document.querySelectorAll('#info [data-measure="start"]').forEach(b=>b.disabled=on);
+  document.querySelectorAll('#info [data-measure="stop"]').forEach(b=>b.disabled=!on);}
+async function setMeasure(action,finish=false){
+  let r;
+  try{r=await fetch("/api/measure",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action,finish_test:finish})});}
+  catch(e){alert("連不到 NetSonar。請點「應用程式」裡的 NetSonar 把它打開。");return false;}
+  if(r.status===409&&action==="stop"&&!finish){
+    if(confirm("定時測試正在進行。\n停止量測會一併結束測試，並保存到目前為止的報告。\n要停止嗎？"))return setMeasure("stop",true);
+    return false;}
+  if(!r.ok){alert((await r.json()).detail);return false;}
+  applyMeasure(await r.json());
+  pollTest();side();drawLive().catch(()=>{});
+  if($("#info").classList.contains("on"))loadInfo();
+  return true;}
+document.addEventListener("click",e=>{const b=e.target.closest&&e.target.closest("[data-measure]");if(b&&!b.disabled)setMeasure(b.dataset.measure);});
 const secG={where:"where",wifi:"wifi",router:"gateway",external:"latency",jitter:"jitter",dns:"dns",vpn:"vpn"};
 function drawAdvice(a){const o=a.overall;
   $("#diag").className="advice "+o.level;
-  setH($("#diag"),`<div class="ovh"><b>${lvIcon[o.level]} 整體網路建議：${esc(o.title)}</b><small>${esc(o.detail)}</small></div>`+a.sections.map(s=>
+  setH($("#diag"),`<div class="ovh"><b>${lvIcon[o.level]} 整體網路建議：${esc(o.title)}</b><small>${measure.measuring?"":"（停止量測前的資料）"}${esc(o.detail)}</small></div>`+a.sections.map(s=>
     `<div class="sec"><div class="sh"><span>${lvIcon[s.level]}</span><b>${esc(s.title)}${ti(secG[s.key])}</b><span class="ss">${esc(s.summary)}</span></div>${s.tips.length?`<ul>${s.tips.map(x=>`<li>${esc(x)}</li>`).join("")}</ul>`:""}</div>`).join(""));}
 const snrLb=v=>v>=40?"極佳":v>=25?"良好":v>=15?"偏低":"很差", noiseLb=v=>v<=-90?"很乾淨":v<=-80?"正常":"偏吵";
 const mosTip="MOS＝通話品質分（1–4.5）：4.3+極佳、4.0+良好、3.6+尚可、3.1 以下很差";
@@ -228,8 +264,12 @@ function plot(svg,series,events){
   let o=`<rect x="${L}" y="${T}" width="${W-L-R}" height="${H-T-B}" fill="#fafbfc"/>`;
   for(let i=0;i<=4;i++){const v=vmax*i/4,y=Y(v);o+=`<line x1="${L}" x2="${W-R}" y1="${y}" y2="${y}" stroke="#e3e8ef"/><text x="${L-6}" y="${y+4}" text-anchor="end" font-size="11" fill="#6b7788">${Math.round(v)}</text>`;}
   for(let i=0;i<=4;i++){const t=t0+(t1-t0)*i/4;o+=`<text x="${X(t)}" y="${H-6}" text-anchor="middle" font-size="11" fill="#6b7788">${new Date(t*1000).toLocaleTimeString("zh-TW",(t1-t0<3600?{hour12:false,hour:"2-digit",minute:"2-digit",second:"2-digit"}:{hour12:false,hour:"2-digit",minute:"2-digit"}))}</text>`;}
-  (events||[]).filter(e=>e.ts>=t0&&e.ts<=t1).forEach(e=>{o+=`<line x1="${X(e.ts)}" x2="${X(e.ts)}" y1="${T}" y2="${H-B}" stroke="${e.minor?"#7dd3fc":"#94a3b8"}" stroke-dasharray="${e.minor?"1 3":"4 3"}"><title>${esc(tm(e.ts)+" "+e.text)}</title></line>`;});
-  series.forEach(s=>{let d="",gap=true;s.pts.forEach(p=>{if(p.v==null){gap=true;return;}d+=(gap?"M":"L")+X(p.t).toFixed(1)+" "+Y(p.v).toFixed(1);gap=false;});
+  (events||[]).filter(e=>e.ts>=t0&&e.ts<=t1&&!e.kind).forEach(e=>{o+=`<line x1="${X(e.ts)}" x2="${X(e.ts)}" y1="${T}" y2="${H-B}" stroke="${e.minor?"#7dd3fc":"#94a3b8"}" stroke-dasharray="${e.minor?"1 3":"4 3"}"><title>${esc(tm(e.ts)+" "+e.text)}</title></line>`;});
+  series.forEach(s=>{
+    // 兩點之間隔太久（超過平常間隔的 5 倍，例如停止量測或程式沒開的那段時間）就斷開，不連成一條直線
+    const dts=[];for(let i=1;i<s.pts.length;i++)dts.push(s.pts[i].t-s.pts[i-1].t);dts.sort((a,b)=>a-b);
+    const med=dts.length?dts[Math.floor(dts.length/2)]:0,lim=med>0?Math.max(med*5,3):Infinity;
+    let d="",gap=true,prev=null;s.pts.forEach(p=>{if(p.v==null){gap=true;return;}if(prev!==null&&p.t-prev>lim)gap=true;d+=(gap?"M":"L")+X(p.t).toFixed(1)+" "+Y(p.v).toFixed(1);gap=false;prev=p.t;});
     o+=`<path d="${d}" fill="none" stroke="${s.color}" stroke-width="1.6"/>`;
     s.pts.forEach(p=>{if(p.loss>0)o+=`<circle cx="${X(p.t)}" cy="${H-B-3}" r="2.5" fill="#dc2626"><title>${tm(p.t)} 丟包 ${p.loss}%</title></circle>`;});});
   svg.setAttribute("viewBox",`0 0 ${W} ${H}`);svg.innerHTML=o;
@@ -304,15 +344,20 @@ function cards(sum){
 const priv={ssid:true,ip:true};
 function maskable(key,text){return priv[key]?`${"•".repeat(8)}<span class="mask" onclick="priv['${key}']=false;side()">顯示</span>`:`${esc(text)}<span class="mask" onclick="priv['${key}']=true;side()">隱藏</span>`;}
 function offline(on){
-  $("#offbar").innerHTML=!on?"":`<div class="banner"><b>${stopped?"NetSonar 已停止":"連不到 NetSonar 的背景程式"}</b>（目前沒有在量測）。要重新啟動：打開「應用程式」裡的 <b>NetSonar</b>；如果你是用終端機啟動的，請重新執行 <code>./run_dashboard.sh</code>。啟動後這個頁面會自動恢復。</div>`;
-  if(!on)stopped=false;}
+  if(!on&&quitted&&Date.now()-quitAt<5000)return;   // 剛按「結束」的幾秒內，程式可能還沒完全關掉：先不要收掉「已結束」
+  document.body.classList.toggle("offline",on);
+  $("#offbar").innerHTML=!on?"":`<div class="banner"><b>${quitted?"NetSonar 已結束":"連不到 NetSonar"}</b>${quitted?"":"（可能已經結束：關掉網頁約 1 分鐘後會自動結束）"}，目前沒有在量測，網頁上的按鈕也暫時不能用。要再使用：點「應用程式」裡的 <b>NetSonar</b>（打開後要按「開始量測」）；如果你是用終端機啟動的，請重新執行 <code>./run_dashboard.sh</code>。打開後這個頁面會自動恢復。</div>`;
+  if(on){$("#mstate").className="mstate off";$("#mstate").textContent="NetSonar 目前沒有在執行";
+    document.querySelectorAll("#info [data-measure]").forEach(b=>b.disabled=true);}   // 恢復連線後 applyMeasure 會重新設定
+  if(!on)quitted=false;}
 async function side(){
   try{
-    const [d,sum,e,al,ev]=await Promise.all([J("/api/advice"),J("/api/summary?range=5m"),J("/api/env"),J("/api/alerts"),J("/api/events")]);
+    const [ms,d,sum,e,al,ev]=await Promise.all([J("/api/measure"),J("/api/advice"),J("/api/summary?range=5m"),J("/api/env"),J("/api/alerts"),J("/api/events")]);
+    applyMeasure(ms);
     drawAdvice(d);
     cards(sum.targets);
     const hh=(await J("/api/health")).engine;
-    $("#busybar").innerHTML=hh.ok?"":`<div class="banner">⚠️ 電腦偏忙：量測可能被拖慢，這時的逾時不一定是網路問題（詳見「說明」頁的運作狀態）。</div>`;
+    $("#busybar").innerHTML=hh.state!=="busy"?"":`<div class="banner">⚠️ 電腦偏忙：量測可能被拖慢，這時的逾時不一定是網路問題（詳見「說明」頁的運作狀態）。</div>`;
     const v=e.env.vpn||{};
     $("#vpnbar").innerHTML=v.active?`<div class="banner">🔒 VPN 開啟中（${esc(v.interface)}）：所有延遲都包含「繞到 VPN 伺服器」的距離，數字會偏高；「路由器」那張卡片才是你家網路的真實狀況。</div>`:"";
     routerName=(await J("/api/diagnosis")).router;
@@ -383,6 +428,10 @@ function renderTrace(j){
 /* ---------- 定時測試 / 下載速度 ---------- */
 const dur=s=>s>=3600?`${Math.floor(s/3600)} 小時 ${Math.round(s%3600/60)} 分`:s>=60?`${Math.floor(s/60)} 分 ${s%60} 秒`:`${s} 秒`;
 async function startTest(m){
+  try{measure=await J("/api/measure");}catch(e){}
+  if(!measure.measuring){
+    if(!confirm("目前沒有在量測。\n要開始量測，並開始定時測試嗎？"))return;
+    if(!await setMeasure("start"))return;}
   const r=await fetch("/api/test/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({minutes:m||null,label:$("#tlabel").value.trim()})});
   if(!r.ok)alert((await r.json()).detail);pollTest();}
 let selMin=5;   // 目前選的時長（分鐘）；0 = 持續監測。按「開始測試」才會真的開始
@@ -441,9 +490,9 @@ document.querySelectorAll("[data-clear]").forEach(b=>b.onclick=async()=>{
   const what=b.dataset.clear;
   if(!confirm(`確定要清除「${b.dataset.label}」嗎？\n\n清除後無法復原。之後還想看的話，請先按「下載 CSV」保存。`))return;
   try{const r=await fetch("/api/clear",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({what:what==="all"?"all":[what],confirm:true})});
-    if(!r.ok){alert((await r.json()).detail);return;}}catch(e){alert("清除失敗：連不到 NetSonar。");return;}
+    if(!r.ok){alert((await r.json()).detail);return;}}catch(e){alert("NetSonar 目前沒有在執行，所以無法清除。\n請先點「應用程式」裡的 NetSonar 把它打開（打開後不會自動量測），再按一次清除。");return;}
   (what==="all"?Object.keys(afterClear):[what]).forEach(k=>afterClear[k]());
-  if(what==="all")alert("已清除所有紀錄。量測會從現在重新開始累積。");});
+  if(what==="all")alert("已清除所有紀錄。"+(measure.measuring?"量測會從現在重新開始累積。":"目前沒有在量測；按「開始量測」後會重新開始累積。"));});
 
 /* ---------- 設定 ---------- */
 let sTargets=[],dragFrom=null;
@@ -478,14 +527,17 @@ function fillSettings(d){
   $("#sreset").disabled=!d.customized;
 }
 async function loadHealth(){try{const h=(await J("/api/health")).engine,f=v=>v==null?"—":v+" ms";
-  $("#ehealth").innerHTML=`<b style="color:${h.ok?"#16a34a":"#dc2626"}">${h.ok?"✅ 正常：本程式沒有被拖慢，逾時多半是網路本身的問題":"⚠️ 電腦偏忙：量測可能被拖慢（可關閉其他很吃資源的程式，或減少目標、拉長量測間隔）"}</b><br>
+  const ST={ok:["#16a34a","✅ 正常：本程式沒有被拖慢，逾時多半是網路本身的問題"],busy:["#dc2626","⚠️ 電腦偏忙：量測可能被拖慢（可關閉其他很吃資源的程式，或減少目標、拉長量測間隔）"],
+    warming:["#1e3a5f","⏳ 剛開始量測，資料累積中：程式剛啟動時本來就比較慢，約 1 分鐘後才開始判斷"],stopped:["#1e3a5f","⏸ 目前沒有在量測（以下是最後一次量測時的數字）"]}[h.state]||["#6b7788",""];
+  $("#ehealth").innerHTML=`<b style="color:${ST[0]}">${ST[1]}</b><br>
   每次量測的額外耗時（電腦啟動量測程式所花的時間，不是網路延遲）：一般 ${f(h.overhead_ms.p50)}、慢的時候 ${f(h.overhead_ms.p95)}、最多 ${f(h.overhead_ms.max)}（正常通常小於 50 ms）<br>
   程式反應延遲（該量的時候晚了多久才量）：一般 ${f(h.loop_lag_ms.p50)}、慢的時候 ${f(h.loop_lag_ms.p95)}、最多 ${f(h.loop_lag_ms.max)}（正常小於 100 ms）<br>
   已量測 ${h.pings} 次，其中「等太久被強制結束」${h.hung_pings} 次（目標不回應時偶爾會發生，比例不高就不用擔心）；目前 ${h.targets} 個目標、每 ${h.interval_sec} 秒量一次。`;}catch(e){}}
 async function loadAbout(){try{const a=await J("/api/about");
-  $("#about").innerHTML=`執行方式：<b>${a.mode==="service"?"背景服務（登入電腦後自動啟動）":"從終端機啟動（關掉終端機視窗就會停止）"}</b><br>量測資料存在：<code>${esc(a.db_path)}</code><br>你的設定存在：<code>${esc(a.settings_path)}</code>`+(a.log_path?`<br>執行紀錄：<code>${esc(a.log_path)}</code>`:"")+`<br><small>想在 Finder 看這些檔案：選單「前往 → 前往檔案夾」，貼上路徑（到最後一個 / 為止）。</small>`;}catch(e){}}
-$("#quit").onclick=async()=>{if(!confirm("要停止 NetSonar 嗎？\n停止後不會再量測，也不會發通知。\n之後打開「應用程式」裡的 NetSonar，或下次登入電腦，就會再啟動。"))return;
-  try{const r=await fetch("/api/quit",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirm:true})});if(r.ok){stopped=true;offline(true);}else alert((await r.json()).detail);}catch(e){stopped=true;offline(true);}};
+  $("#about").innerHTML=`執行方式：<b>${a.mode==="service"?"從「應用程式」裡的 NetSonar 打開（登入電腦時不會自動啟動）":"從終端機啟動（關掉終端機視窗就會結束）"}</b>${a.auto_quit?`<br>關掉網頁約 ${a.quit_after_sec>=60?Math.round(a.quit_after_sec/60)+" 分鐘":a.quit_after_sec+" 秒"}後會自動結束（定時測試進行中會等測試結束）`:""}<br>量測資料存在：<code>${esc(a.db_path)}</code><br>你的設定存在：<code>${esc(a.settings_path)}</code>`+(a.log_path?`<br>執行紀錄：<code>${esc(a.log_path)}</code>`:"")+`<br><small>想在 Finder 看這些檔案：選單「前往 → 前往檔案夾」，貼上路徑（到最後一個 / 為止）。</small>`;}catch(e){}}
+$("#quit").onclick=async()=>{
+  if(!confirm("要結束 NetSonar 嗎？\n程式會完全關閉：不再量測，網頁上的按鈕（包括清除紀錄）也無法使用。"+(measure.test_running?"\n進行中的定時測試會先結束，並保存到目前為止的報告。":"")+"\n之後要再用，請點「應用程式」裡的 NetSonar（打開後要按「開始量測」才會量）。"))return;
+  try{const r=await fetch("/api/quit",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirm:true})});if(r.ok){quitted=true;quitAt=Date.now();offline(true);}else alert((await r.json()).detail);}catch(e){quitted=true;quitAt=Date.now();offline(true);}};
 async function loadSettings(){try{fillSettings(await J("/api/settings"));}catch(e){}}
 $("#ssave").onclick=async()=>{
   const body={targets:sTargets.map(t=>{const o={name:t.name,host:t.host};if(t.p95_ms!==""&&t.p95_ms!=null)o.p95_ms=+t.p95_ms;if(t.mute)o.mute=true;return o;}),interval_sec:+$("#s_interval").value,ping_timeout_sec:+$("#s_timeout").value,
@@ -508,7 +560,8 @@ $("#sfile").onchange=async e=>{const f=e.target.files[0];if(!f)return;const bad=
   $("#smsg").style.color="#16a34a";$("#smsg").textContent="✅ 已匯入，立即生效";fillSettings(await r.json());targets=await J("/api/targets");};
 document.querySelector('nav button[data-t=set]').addEventListener("click",loadSettings);
 async function loadInfo(){loadHealth();loadAbout();
-  try{const h=(await J("/api/health")).engine;$("#how_now").textContent=`${h.targets} 個目標（含路由器），每 ${h.interval_sec} 秒量一次。`;}catch(e){}}
+  try{const [h,m]=await Promise.all([J("/api/health"),J("/api/measure")]);applyMeasure(m);
+    $("#how_now").textContent=`${m.measuring?"量測中":"沒有在量測"}；${h.engine.targets} 個目標（含路由器），每 ${h.engine.interval_sec} 秒量一次。`;}catch(e){}}
 document.querySelector('nav button[data-t=info]').addEventListener("click",loadInfo);
 
 /* ---------- 啟動 ---------- */

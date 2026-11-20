@@ -27,13 +27,14 @@ fi
 
 PORT=$(.venv/bin/python -c 'import json;print(json.load(open("config.json"))["port"])')
 URL="http://127.0.0.1:$PORT"
-# 已經有 NetSonar 在執行（例如用「安裝.command」裝的背景服務）→ 直接打開網頁，不重複啟動
+# 已經有 NetSonar 在執行（例如從「應用程式」裡的 NetSonar 打開的）→ 直接打開網頁，不重複啟動
 if curl -fs --max-time 2 "$URL/api/health" >/dev/null 2>&1; then
-  echo "✅ NetSonar 已經在執行（可能是背景服務），直接打開：$URL"
+  echo "✅ NetSonar 已經在執行（可能是從「應用程式」打開的），直接打開：$URL"
   open "$URL" 2>/dev/null || true
   exit 0
 fi
 echo "🚀 儀表板啟動中：$URL （按 Ctrl+C 結束）"
+echo "   打開後要在網頁按「開始量測」才會開始量；關掉網頁約 1 分鐘後會自動結束。"
 # 稍等伺服器就緒再開瀏覽器（macOS 的 open）
 ( sleep 2; command -v open >/dev/null 2>&1 && open "$URL" ) &
 exec .venv/bin/python serve.py

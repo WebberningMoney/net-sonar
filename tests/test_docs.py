@@ -76,7 +76,8 @@ def test_clear_and_export_buttons_are_documented():
 def test_changelog_has_unreleased_section_and_no_stale_names():
     assert "## [Unreleased]" in CHANGELOG
     for text, where in ((README, "README"), (ARCH, "ARCHITECTURE")):
-        for stale in ("rdap.org", "Chart.js", "dashboard.py", "引擎健康度", "程式健康度"):
+        for stale in ("rdap.org", "Chart.js", "dashboard.py", "引擎健康度", "程式健康度",
+                      "開機登入後自動在背景執行", "開機自動啟動", "停止 NetSonar"):
             assert stale not in text, f"{where} 還留著過時的說法：{stale}"
 
 
@@ -86,3 +87,16 @@ def test_info_tab_explains_how_it_works_and_holds_status_and_about():
         assert must in info, f"「說明」分頁少了：{must}"
     assert "100 −（丟包% × 2 ＋ 平均 ÷ 2 ＋ 抖動 × 1.5）" in info, "說明頁的分數公式要和 stats.ping_score 一致，改公式時兩邊一起改"
     assert "程式健康度" not in HTML
+
+
+def test_start_stop_quit_are_explained():
+    """開始／停止量測、結束 NetSonar、登入時不自動啟動、關掉網頁自動結束：畫面與 README 都要講清楚。"""
+    info = HTML[HTML.index('<section id="info">'):HTML.index('<section id="trace">')]
+    for must in ('data-measure="start"', 'data-measure="stop"', "量測開關", "⏻ 結束 NetSonar", "不會</b>自動量測", "自動結束"):
+        assert must in info, f"「說明」頁少了：{must}"
+    assert 'id="measurebar"' in HTML, "每一頁最上方要有「量測已停止」的提示列"
+    for must in ("▶ 開始量測", "⏸ 停止量測", "⏻ 結束 NetSonar", "登入電腦時不會自動啟動", "關掉網頁約 1 分鐘後"):
+        assert must in README, f"README 少了：{must}"
+    svc = (ROOT / "scripts" / "netsonar_service.sh").read_text(encoding="utf-8")
+    assert "<key>KeepAlive</key>" not in svc, "安裝腳本不應該再讓 NetSonar 結束後被自動重開"
+    assert 'PLIST="$BASE/$LABEL.plist"' in svc, "設定檔不可以放在 LaunchAgents（登入時會自動啟動）"

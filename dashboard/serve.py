@@ -1,6 +1,7 @@
 """serve.py —— 啟動儀表板的網頁伺服器。
 
-誰會執行它：run_dashboard.sh（終端機啟動）、或「安裝.command」裝好的背景服務（開機自動啟動）。
+誰會執行它：run_dashboard.sh（終端機啟動）、或點「應用程式」裡的 NetSonar（安裝.command 裝好的背景工作）。
+打開時不會自動量測，要在網頁按「開始量測」；關掉網頁約 1 分鐘後會自動結束（見 app.py 的 create_app）。
 為什麼不直接用 `uvicorn app:app` 指令？為了按 Ctrl+C 時能「立刻、乾淨」地結束：
 先通知網頁的即時連線收工，再關閉伺服器。
 """

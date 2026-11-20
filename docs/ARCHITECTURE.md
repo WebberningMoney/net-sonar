@@ -9,7 +9,7 @@
 ```text
 ┌──────────────────────────── 你的 Mac ────────────────────────────┐
 │                                                                  │
-│  背景服務（開機自動啟動）或 run_dashboard.sh（終端機啟動）       │
+│  點「應用程式」裡的 NetSonar 或 run_dashboard.sh（終端機）        │
 │     │                                                            │
 │     └─ serve.py 啟動網頁伺服器 → app.py（大腦）                  │
 │           ├─ 每個目標各自每秒 ping 一次（probe.py）              │
@@ -39,7 +39,7 @@
 | 網頁 | **一個 HTML 檔 + 原生 JavaScript** | 不需要任何建置工具，打開就能改 |
 | 圖表 | **自己畫的 SVG** | 不依賴外部套件，離線也能用 |
 | 通知 | macOS 內建的 `osascript` | 不用安裝任何東西 |
-| 開機自動啟動 | macOS 的 **LaunchAgent** | 系統內建的背景服務機制 |
+| 在背景執行 | macOS 的 **launchd**（點 NetSonar 時才載入） | 系統內建的背景工作機制；不需要開著終端機 |
 
 **為什麼另外寫一個 Python 版，不繼續用 Bash？** Bash 很適合「量一次、印報告」，但要做即時網頁、資料庫、圖表、通知會變得很難讀也很難測試。Bash 版 `net_probe.sh` 仍然保留。
 
@@ -49,6 +49,12 @@
 
 ## 3. 量測是怎麼進行的
 
+0. **兩個狀態要分清楚**：程式「開著／關著」，以及開著時「量測中／停止量測」。
+   - 打開時是**停止量測**，要在網頁按「開始量測」（`POST /api/measure`）。
+   - 停止量測時：不 ping、不評估警示、不自動掃描 Wi-Fi；網路環境與路由器位址（本機讀取）照常更新，網頁的查看、匯出、清除、設定都能用。
+   - 停止量測時，畫面的「現在」改成停止前最後一筆資料的時間（`Engine.ref_time`），所以卡片、建議、即時圖表、匯出會停在停止前，不會慢慢變成空白或「沒有回應」。
+   - 開始量測時，警示用的「最近 60 筆」和「無回應」標記會安靜地重設，舊資料不會觸發通知；第一分鐘先不判斷「電腦偏忙」（剛啟動本來就比較慢）。
+   - 定時測試進行中要停止量測，必須另外確認，測試會一併結束並保存到目前為止的報告。
 1. 每個目標都有**自己的量測迴圈**，每隔設定的秒數 ping 一次。各目標的起跑時間錯開，不會在同一瞬間一起送出。
    這樣做的好處：某個目標一直沒回應時，不會拖慢其他目標。
 2. 結果先放進一個暫存區，**每秒統一處理一次**：寫進資料庫、檢查警示、推送給網頁。
@@ -56,6 +62,10 @@
 4. **家裡的路由器**會被自動找出來一起量（每分鐘重新找一次，換 Wi-Fi 也會跟著變）。開 VPN 時也能找到真正的路由器，而不是 VPN 通道（見 `gateway.py`）。
 5. 一直完全沒回應、但其他目標正常的目標，會被標為「無回應」，暫停對它的警示和判斷。
 6. **運作狀態**（「說明」頁）：記錄每次 ping 額外花了多少時間、程式有沒有延遲，用來分辨「網路不穩」和「電腦太忙」。
+   狀態有四種：停止量測、剛開始（暖機一分鐘，暖機期間的紀錄最後會丟掉）、電腦偏忙、正常。
+7. **關掉網頁後自動結束**（`Engine.check_auto_quit`，每秒檢查一次）：沒有任何網頁的即時連線，而且超過 60 秒沒有任何網頁請求
+   （只確認程式活著的 `/api/health` 不算），就自動結束。剛打開的 90 秒內不判斷（等瀏覽器打開網頁）；
+   定時測試、下載測速、路徑分析進行中會先等它們結束。時間用不含睡眠的計時，電腦睡醒時不會誤判。量測中被自動結束時會發一則通知。
 
 ---
 
@@ -85,14 +95,14 @@
 
 | 啟動方式 | 資料檔與設定的位置 |
 |---|---|
-| 雙擊「安裝.command」（背景服務） | `~/Library/Application Support/NetSonar/data/` |
+| 雙擊「安裝.command」後點 NetSonar 打開 | `~/Library/Application Support/NetSonar/data/` |
 | `run_dashboard.sh`（終端機） | `dashboard/` 資料夾 |
 
 設定分兩層：`config.json` 是程式附帶的預設值；你在網頁「設定」頁改的部分存在 `settings.json`，啟動時蓋在預設值上面。所以更新程式不會蓋掉你的設定。
 
 ---
 
-## 6. 背景服務（安裝.command）怎麼運作
+## 6. 安裝與打開（安裝.command、NetSonar App）怎麼運作
 
 `安裝.command` 會呼叫 `scripts/netsonar_service.sh install`，做這幾件事：
 
@@ -100,14 +110,20 @@
 2. 把 `dashboard/` 複製到 `~/Library/Application Support/NetSonar/app/`。
    為什麼要複製？macOS 的隱私保護不讓背景程式讀取「桌面」「文件」等資料夾。
 3. 在那裡建立虛擬環境並安裝套件。
-4. 寫一個 LaunchAgent 設定檔到 `~/Library/LaunchAgents/com.netsonar.dashboard.plist`，告訴 macOS：「登入時啟動它，當掉了就自動重開」。
+4. 寫一個給 launchd（macOS 管理背景工作的系統）的設定檔：`~/Library/Application Support/NetSonar/com.netsonar.dashboard.plist`。
+   - **故意不放在 `~/Library/LaunchAgents`**：launchd 只會在登入時自動載入那個資料夾裡的設定，所以 NetSonar 登入時不會自動啟動。
+   - 設定裡有 `RunAtLoad`（載入就啟動），**沒有** `KeepAlive`（不會在結束後被自動重開）。
+   - 舊版曾放在 `~/Library/LaunchAgents`（登入時自動啟動、當掉自動重開），重新安裝或解除安裝時會移除。
 5. 在「應用程式」建立 `NetSonar.app`。它只是一個很小的啟動器（一支 shell 腳本加上圖示）：
-   先檢查背景服務有沒有回應，沒有就請 macOS 啟動它，然後用瀏覽器打開儀表板。
-6. 啟動服務、確認網頁有回應，然後打開瀏覽器。
+   NetSonar 沒在執行時，就用 `launchctl bootstrap` 載入上面的設定檔（等於啟動它）；已載入但沒回應時用 `launchctl kickstart -k` 重啟；
+   然後用瀏覽器打開儀表板。
+6. 啟動一次、確認網頁有回應，然後打開瀏覽器（這時是「停止量測」狀態）。
 
-**停止**：「設定」頁的「停止 NetSonar」會呼叫 `POST /api/quit`。背景服務模式下，程式會請 macOS 把服務卸下
-（`launchctl bootout`；如果只是結束程式，macOS 會以為它當掉而自動重開）。設定檔還在，所以下次登入、或點 NetSonar 圖示時會再啟動。
-這個網址只接受儀表板自己的網頁送來的請求，其他網站無法叫瀏覽器替它關掉你的 NetSonar。
+**結束**：「說明」頁的「結束 NetSonar」會呼叫 `POST /api/quit`（進行中的定時測試會先結束並保存報告），關掉網頁約 1 分鐘後也會自動結束。
+從 NetSonar App 打開的，程式會請 macOS 把這個背景工作卸下（`launchctl bootout`）；終端機啟動的則等同按 Ctrl+C。
+結束前會先收掉網頁的即時連線，伺服器才不會一直等它們。這個網址只接受儀表板自己的網頁送來的請求，其他網站無法叫瀏覽器替它關掉你的 NetSonar。
+
+網頁沒辦法啟動電腦上的程式（瀏覽器的安全規定），所以 NetSonar 結束後，網頁上的按鈕都不能用，要從「應用程式」重新打開。
 
 執行紀錄寫在 `~/Library/Logs/NetSonar.log`。
 
@@ -137,7 +153,8 @@
 | `/api/settings/export` | 把目前的設定下載成檔案（匯入時網頁讀檔後用 `PUT /api/settings` 送回，走同一套檢查） |
 | `/api/health` | 運作狀態 |
 | `/api/about` | 執行方式、資料與設定存放位置 |
-| `/api/quit` | 停止 NetSonar |
+| `/api/measure` | 量測狀態（GET）；開始或停止量測（POST，`{"action": "start"}` 或 `"stop"`；定時測試進行中停止要加 `"finish_test": true`） |
+| `/api/quit` | 結束 NetSonar（程式完全關閉） |
 | `/api/export.csv` | 下載量測紀錄（`target=all` 或某個目標） |
 | `/api/alerts.csv`、`/api/reports.csv`、`/api/curl.csv`、`/api/traceroute.csv` | 下載警示與事件、測試報告比較表、測速結果、路徑分析結果 |
 | `/api/clear` | 清除紀錄（量測、警示與事件、報告、測速、路徑分析，或全部） |
@@ -166,7 +183,9 @@ cd tests
 ../dashboard/.venv/bin/python -m pytest -q
 ```
 
-真正的 ping、Wi-Fi 資訊、系統通知、背景服務，只能在 Mac 上實際操作驗證。
+真正的 ping、Wi-Fi 資訊、系統通知、launchd（點圖示打開、登入時不自動啟動），只能在 Mac 上實際操作驗證。
+`tests/test_measure.py` 測開始／停止量測、畫面停格、自動結束；`tests/test_service.py` 用「測試模式」實際跑一遍安裝與解除安裝腳本
+（`NETSONAR_HOME` 指到暫存資料夾、`NETSONAR_DRYRUN=1` 不呼叫 launchctl）。
 
 ### 文件有沒有跟上程式？（自動檢查）
 
@@ -183,7 +202,7 @@ AI 助理的完整協作守則在 [`CLAUDE.md`](../CLAUDE.md)。
 
 ```text
 dashboard/
-├── serve.py        啟動網頁伺服器
+├── serve.py        啟動網頁伺服器（打開時不量測、關掉網頁後自動結束，見 app.py 最下方）
 ├── app.py          大腦：量測迴圈、資料整理、所有 /api 網址
 ├── probe.py        呼叫 ping
 ├── gateway.py      找出家裡的路由器（開 VPN 也不會找錯）
@@ -203,6 +222,6 @@ dashboard/
 ├── config.json     預設設定
 ├── requirements.txt 需要的套件與版本
 └── web/            網頁（index.html、icon.svg）
-scripts/netsonar_service.sh   安裝／移除／啟動／停止背景服務，並建立「應用程式」裡的圖示
+scripts/netsonar_service.sh   安裝／移除、在背景打開／結束 NetSonar，並建立「應用程式」裡的圖示
 scripts/git-hooks/            commit／push 前的自動檢查（開發用）
 ```

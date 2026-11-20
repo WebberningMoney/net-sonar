@@ -5,10 +5,16 @@
   2. 整理：每秒把結果寫進資料庫，同時檢查要不要發警示、更新網頁。
   3. 提供資料：網頁透過 /api/... 這些網址來拿數字（例如 /api/summary 是各目標的統計）。
   4. 即時推送：/api/stream 讓網頁每秒自動收到最新結果，不用一直重新整理。
+  5. 使用者按下的動作：開始／停止量測、儲存設定、開始定時測試、下載 CSV、清除紀錄、結束程式。
+     「清除」「結束」這類不能復原的動作，只接受儀表板自己的網頁送來、而且確認過的請求（見 _guard）。
 
 只開放給這台電腦（127.0.0.1），同一個 Wi-Fi 的其他裝置連不到。
-  5. 使用者按下的動作：儲存設定、開始定時測試、下載 CSV、清除紀錄、停止程式。
-     「清除」「停止」這類不能復原的動作，只接受儀表板自己的網頁送來、而且確認過的請求（見 _guard）。
+
+兩個「狀態」要分清楚：
+  • 程式開著／關著：從「應用程式」裡的 NetSonar 打開；按「結束 NetSonar」或關掉網頁約 1 分鐘後結束。
+  • 量測中／停止量測：程式開著時才有意義。打開時預設「停止量測」，要在網頁按「開始量測」。
+    停止量測時不 ping、不發警示、不自動掃描 Wi-Fi，但網頁照常可以看資料、匯出、清除紀錄、改設定；
+    畫面會停在「停止前」的資料（見 ref_time），不會慢慢變成空白。
 
 其他檔案的分工：probe.py 去 ping、stats.py 算統計、storage.py 存資料、alerts.py 發警示、
 diagnose.py／jitter.py／advice.py 把數字翻成白話建議、netenv.py 讀網路環境、export.py 把紀錄轉成 CSV。
@@ -67,7 +73,9 @@ def load_config() -> dict:
 class Engine:
     """監測引擎：持有設定、資料庫，以及「最新一筆」結果。"""
 
-    def __init__(self, cfg: dict, storage: Storage, runner=None, notifier=None):
+    WARMUP_SEC = 60      # 剛開始量測的這段時間，程式本身比較慢（啟動、讀 Wi-Fi 資訊），先不判斷「電腦偏忙」
+
+    def __init__(self, cfg: dict, storage: Storage, runner=None, notifier=None, measuring: bool = True):
         self.cfg, self.storage = cfg, storage
         self.base_cfg = dict(cfg)         # 「恢復預設」用
         self._notifier = notifier
@@ -108,6 +116,20 @@ class Engine:
         self.trace_jobs: dict = {}         # job_id → 路徑分析進度
         self.geo_lookup = geo.lookup_ip    # 查位址的大約位置與公司；測試時可換成假的
         self.geo_cache: dict = {}          # 查過的位址記起來，同一站不重複查
+        # 量測中／停止量測（停止時畫面停在 stopped_at 之前的資料；沒有任何資料時是 None）
+        self.measuring = measuring
+        self.stopped_at = None if measuring else storage.last_sample_ts()
+        if not measuring:                  # 卡片的大數字先顯示停止前每個目標的最後一筆
+            self.latest = {"ts": self.stopped_at or 0, "results": storage.last_values(), "measuring": False}
+        self._warm_until = time.monotonic() + self.WARMUP_SEC if measuring else 0.0
+        # 關掉網頁後自動結束（正式執行時由 create_app 打開；測試預設關閉）
+        self.auto_quit = False
+        self.quit_after = 60               # 沒有任何網頁開著超過這麼多秒 → 自動結束
+        self.quit_grace = 90               # 剛打開的這段時間不判斷（等瀏覽器打開網頁）
+        self.started_mono = time.monotonic()
+        self.last_seen = time.monotonic()  # 最後一次有網頁來要資料的時間（見 create_app 的 _Seen）
+        self.on_quit = None                # 要自動結束時呼叫的函式（create_app 設定）
+        self._quitting = False
 
     @property
     def targets(self) -> list:
@@ -169,8 +191,10 @@ class Engine:
         # 💡 Wi-Fi 詳細資訊來自 system_profiler，它會讓 Wi-Fi 網卡「掃描周圍網路」（約 7 秒），
         #    掃描時網卡暫時離開目前頻道 → 全部目標一起出現延遲尖峰。所以預設每 5 分鐘才更新一次，
         #    可在設定頁調整或關閉（0＝只在手動按「更新 Wi-Fi 資訊」時才執行）。
+        #    停止量測時不自動掃描（剛打開程式時讀一次，讓「網路環境」面板有內容）。
         every = self.wifi_refresh
-        if every and now - self._last_wifi_check >= every and not self._wifi_busy:
+        first = self._last_wifi_check < 0
+        if every and (self.measuring or first) and now - self._last_wifi_check >= every and not self._wifi_busy:
             self.request_wifi_refresh(now)
 
     def request_wifi_refresh(self, now: float | None = None) -> bool:
@@ -240,6 +264,8 @@ class Engine:
     #    好處：①不會每秒同時送出一整批封包 ②某個目標一直逾時（例如擋 ICMP）不會拖慢其他目標。
     #    量測結果先放進緩衝區 _buf，由 _aggregate 每秒統一寫入資料庫、更新警示與網頁。
     def _record(self, name: str, rtt, wall_ms: float, timeout: float) -> None:
+        if not self.measuring:
+            return                                  # 剛按下停止時還在路上的那一次，不算
         self._buf.append((int(time.time()), name, rtt))
         m = self.metrics
         m["pings"] += 1
@@ -265,6 +291,12 @@ class Engine:
                 nxt = now                                      # 落後了不要補跑（避免連續狂送）
             await asyncio.sleep(nxt - now)
 
+    def _cancel_tasks(self) -> None:
+        """停掉所有目標的量測迴圈（停止量測、或程式結束時）。"""
+        for t in self._tasks.values():
+            t.cancel()
+        self._tasks.clear()
+
     def _reconcile(self) -> None:
         """依目前的目標清單啟動／停止各目標的量測迴圈（設定改了、路由器剛偵測到時會用到）。"""
         names = [t["name"] for t in self.targets]
@@ -287,6 +319,10 @@ class Engine:
             self.windows.setdefault(n, deque(maxlen=60)).append(v)
             results[n] = v
         ts = int(time.time())
+        if not self.measuring:
+            # 停止量測：資料不會再變，不判斷「無回應」、不評估警示（否則冷卻時間一過，舊資料又會再通知一次）
+            self.latest = {"ts": ts, "results": results, "alerts": [], "measuring": False}
+            return await self._after_aggregate(ts)
         self._update_unreachable()
         # 警示對象：排除「已標記無回應」以及「整個視窗（≥5 筆）從沒回應過、而其他目標正常」的目標，
         # 避免剛啟動或剛新增一個擋 ICMP 的位址時，在判定成「無回應」之前先吵一輪通知
@@ -296,10 +332,14 @@ class Engine:
                  and all(v is None for v in w) and others_alive(n)}
         new_alerts = self.alerts.evaluate(
             {n: list(w) for n, w in self.windows.items() if n not in self.dead and n not in quiet}, ts)
-        self.latest = {"ts": ts, "results": results, "alerts": new_alerts}
+        self.latest = {"ts": ts, "results": results, "alerts": new_alerts, "measuring": True}
         t = self.test
         if t["state"] == "running" and t["ends_at"] and ts >= t["ends_at"]:
             self.finish_test(ts)
+        return await self._after_aggregate(ts)
+
+    async def _after_aggregate(self, ts: int) -> dict:
+        """推送給網頁＋每分鐘的資料整理（量測中、停止量測都要做）。"""
         for q in list(self.subscribers):
             if q.qsize() < 5:              # 瀏覽器太慢就丟棄舊訊息，避免記憶體堆積
                 q.put_nowait(self.latest)
@@ -336,6 +376,8 @@ class Engine:
         timeout = self.cfg.get("ping_timeout_sec", 1)
         await self.refresh_gateway(time.monotonic())
         await self.refresh_env(time.monotonic())
+        if not self.measuring:
+            return await self._aggregate()
         targets = self.targets
         rtts = await asyncio.gather(*[probe.ping_once(t["host"], timeout, self.runner) for t in targets])
         ts = int(time.time())
@@ -347,23 +389,33 @@ class Engine:
             while True:
                 started = time.monotonic()
                 try:
+                    # 網路環境、路由器位址是本機讀取（不會送出量測封包），停止量測時也照常更新
                     await self.refresh_gateway(started)
                     await self.refresh_env(started)
-                    self._reconcile()
+                    if self.measuring:
+                        self._reconcile()
+                    else:
+                        self._cancel_tasks()
                     await self._aggregate()
+                    self.check_auto_quit(time.monotonic())
                 except Exception as e:     # 單輪失敗不要讓整個監測停掉
                     print("tick error:", e)
                 interval = self.cfg.get("interval_sec", 1.0)
                 await asyncio.sleep(max(0.0, interval - (time.monotonic() - started)))
                 # 事件迴圈延遲：本來該睡 interval，實際多睡了多久。數字大＝本程式被拖慢
                 self.metrics["lag"].append(max(0.0, (time.monotonic() - started - interval) * 1000))
+                if self._warm_until and time.monotonic() >= self._warm_until:
+                    self._warm_until = 0.0
+                    self._reset_metrics()           # 暖機結束：丟掉剛啟動時偏慢的紀錄，之後才開始判斷
         finally:
-            for t in self._tasks.values():
-                t.cancel()
-            self._tasks.clear()
+            self._cancel_tasks()
+
+    def _reset_metrics(self) -> None:
+        self.metrics = {"overhead": deque(maxlen=300), "lag": deque(maxlen=120), "hung": 0, "pings": 0}
 
     def engine_health(self) -> dict:
-        """引擎健康度：用來分辨「是網路不穩」還是「本程式／本機太忙」。"""
+        """運作狀態：用來分辨「是網路不穩」還是「本程式／本機太忙」。
+        state：stopped（停止量測）、warming（剛開始量測，先不判斷）、busy（電腦偏忙）、ok（正常）。"""
         def pct(vals, p):
             v = sorted(vals)
             return round(v[min(len(v) - 1, int(len(v) * p))], 1) if v else None
@@ -373,7 +425,9 @@ class Engine:
         # 因為目標不回應（例如 VPN 擋 ICMP）時偶爾也會發生，不代表電腦忙
         busy = bool((pct(oh, .95) or 0) > 150 or (pct(lag, .95) or 0) > 300
                     or m["hung"] > max(5, 0.1 * m["pings"]))
-        return {"ok": not busy, "pings": m["pings"], "hung_pings": m["hung"],
+        state = ("stopped" if not self.measuring else
+                 "warming" if time.monotonic() < self._warm_until else "busy" if busy else "ok")
+        return {"ok": state != "busy", "state": state, "pings": m["pings"], "hung_pings": m["hung"],
                 "overhead_ms": {"p50": pct(oh, .5), "p95": pct(oh, .95), "max": round(max(oh), 1) if oh else None},
                 "loop_lag_ms": {"p50": pct(lag, .5), "p95": pct(lag, .95), "max": round(max(lag), 1) if lag else None},
                 "targets": len(self.targets), "interval_sec": self.cfg.get("interval_sec", 1.0)}
@@ -475,6 +529,9 @@ class Engine:
             for w in self.windows.values():        # 警示用的「最近 60 筆」也清掉，避免舊資料繼續觸發警示
                 w.clear()
             self.dead = set()
+            self.latest = {**self.latest, "results": {}}     # 卡片的大數字也一起清掉
+            if not self.measuring:
+                self.stopped_at = None             # 已經沒有「停止前的資料」可以顯示了
         if "alerts" in what:
             done["alerts"] = len(self.alerts.history) + len(self.events)
             self.alerts.history.clear()
@@ -492,8 +549,80 @@ class Engine:
             self.trace_jobs = keep
         return done
 
+    # ---- 開始／停止量測、畫面的「現在」、關掉網頁後自動結束 ----
+    def ref_time(self) -> int:
+        """畫面上的「現在」：量測中＝真正的現在；停止量測時＝停止前最後一筆資料的時間。
+        這樣停止量測後，卡片、建議、圖表會停在停止前的樣子，不會隨時間慢慢變成空白或「沒有回應」。"""
+        if not self.measuring and self.stopped_at:
+            return int(self.stopped_at)
+        return int(time.time())
+
+    def measure_state(self) -> dict:
+        return {"measuring": self.measuring, "stopped_at": None if self.measuring else self.stopped_at,
+                "test_running": self.test.get("state") == "running", "auto_quit": self.auto_quit,
+                "quit_after_sec": self.quit_after}
+
+    def start_measuring(self) -> dict:
+        """開始量測。警示從新的資料重新判斷（停止前的舊資料不會觸發通知），第一分鐘先不判斷「電腦偏忙」。"""
+        if self.measuring:
+            return {"changed": False}
+        self.measuring, self.stopped_at = True, None
+        for w in self.windows.values():
+            w.clear()
+        self.dead = set()                           # 安靜重設，不產生「恢復回應」之類的事件
+        self._reset_metrics()
+        self._warm_until = time.monotonic() + self.WARMUP_SEC
+        self._last_env_check = self._last_gw_check = -10**9     # 馬上重新讀一次網路環境
+        self.events.append({"ts": int(time.time()), "kind": "control", "text": "▶ 開始量測"})
+        return {"changed": True}
+
+    def stop_measuring(self) -> dict:
+        """停止量測：不再 ping、不發警示、不自動掃描 Wi-Fi；程式仍開著，網頁照常可用。
+        定時測試進行中時，測試會一併結束，報告保存到目前為止（呼叫前請先跟使用者確認）。"""
+        if not self.measuring:
+            return {"changed": False}
+        out = {"changed": True}
+        if self.test.get("state") == "running":
+            t = self.finish_test()
+            out.update(test_finished=True, report_id=t.get("report_id"))
+        self.measuring = False
+        self._cancel_tasks()
+        self._warm_until = 0.0
+        now = int(time.time())
+        self.stopped_at = now
+        self.events.append({"ts": now, "kind": "control", "text": "⏸ 停止量測"})
+        return out
+
+    def check_auto_quit(self, now: float) -> bool:
+        """關掉網頁後自動結束：沒有任何網頁開著（即時連線數＝0，而且超過 quit_after 秒沒有任何請求），
+        就呼叫 on_quit 把程式關掉。剛打開的 quit_grace 秒內不判斷（等瀏覽器打開網頁）；
+        定時測試、下載測速、路徑分析進行中也先不關，等它們結束。now 用 time.monotonic()（電腦睡眠時不會前進）。"""
+        if not self.auto_quit or self._quitting or self.on_quit is None:
+            return False
+        if now - self.started_mono < self.quit_grace or self.subscribers or now - self.last_seen < self.quit_after:
+            return False
+        if (self.test.get("state") == "running" or self.curl_busy
+                or any(j.get("running") for j in self.trace_jobs.values())):
+            return False
+        self._quitting = True
+        t = self.test
+        if t.get("state") == "done" and t.get("finished", 0) >= time.time() - 120:
+            msg = "定時測試已完成，報告已保存。網頁沒有開著，NetSonar 已自動結束。"
+        elif self.measuring:
+            msg = "網頁關閉超過 1 分鐘，NetSonar 已自動結束，量測也跟著停止。要繼續量測，請重新打開 NetSonar。"
+        else:
+            msg = None                                  # 本來就沒在量測：安靜結束
+        print("網頁已關閉，NetSonar 自動結束", flush=True)
+        if msg and self.alerts.notifier:
+            try:
+                self.alerts.notifier("NetSonar", msg)
+            except Exception:
+                pass
+        self.on_quit()
+        return True
+
     def summary(self, range_key: str) -> dict:
-        since = int(time.time()) - RANGES[range_key]
+        since = self.ref_time() - RANGES[range_key]
         return {t["name"]: {**stats.summarize(self.storage.recent_rtts(t["name"], since)),
                             "unreachable": t["name"] in self.dead}
                 for t in self.targets}
@@ -544,8 +673,8 @@ SERVICE_LABEL = "com.netsonar.dashboard"
 
 
 def _quit_process() -> None:
-    """真的把自己關掉。
-    背景服務：請 macOS 把服務卸下（否則系統會以為它當掉而自動重開）；下次登入或打開 NetSonar App 會再啟動。
+    """真的把自己關掉（「結束 NetSonar」按鈕，或關掉網頁後自動結束）。
+    從 NetSonar App 打開的：請 macOS 把這個背景工作卸下；之後要再用，重新點 NetSonar App（登入時不會自動啟動）。
     終端機啟動：等同按 Ctrl+C。"""
     if os.environ.get("NETSONAR_SERVICE") == "1":
         try:
@@ -557,13 +686,31 @@ def _quit_process() -> None:
     os.kill(os.getpid(), signal.SIGINT)
 
 
+class _Seen:
+    """記下「最後一次有網頁來要資料」的時間，給「關掉網頁後自動結束」判斷用。
+    只是確認程式活著的 /api/health 不算（例如 NetSonar App 啟動時的檢查），免得它讓程式一直不結束。
+    （寫成最簡單的 ASGI 中介層，不包裝回應內容，不會影響即時串流。）"""
+
+    def __init__(self, app, engine):
+        self.app, self.engine = app, engine
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope.get("path") != "/api/health":
+            self.engine.last_seen = time.monotonic()
+        await self.app(scope, receive, send)
+
+
 def create_app(cfg: dict | None = None, storage: Storage | None = None,
-               runner=None, autostart: bool = True, notifier=None, settings_file: Path | None = None) -> FastAPI:
+               runner=None, autostart: bool = True, notifier=None, settings_file: Path | None = None,
+               start_measuring: bool = True, auto_quit: bool = False) -> FastAPI:
+    """建立儀表板。start_measuring：一打開就量測嗎（正式執行時是 False，要在網頁按「開始量測」）；
+    auto_quit：關掉網頁約 1 分鐘後自動結束嗎（正式執行時是 True）。兩者的預設值是給自動化測試用的。"""
     from_disk = cfg is None
     cfg = cfg or load_config()
     sfile = Path(settings_file) if settings_file else settings_path()
     storage = storage or Storage(os.environ.get("NETPROBE_DB", str(BASE / "netprobe.db")))
-    engine = Engine(cfg, storage, runner, notifier)
+    engine = Engine(cfg, storage, runner, notifier, measuring=start_measuring)
+    engine.auto_quit = auto_quit
     if from_disk:
         engine.base_cfg = load_base_config()      # 「恢復預設」要回到 config.json，而不是目前（含自訂）的設定
 
@@ -579,25 +726,52 @@ def create_app(cfg: dict | None = None, storage: Storage | None = None,
     app = FastAPI(title="NetSonar", lifespan=lifespan)
     app.state.engine = engine
     app.state.quit = _quit_process            # 測試時可換成假的，避免真的把測試程式關掉
+    engine.on_quit = lambda: app.state.quit()
+    app.add_middleware(_Seen, engine=engine)
 
     @app.get("/api/about")
     def about():
-        """這個程式目前怎麼執行、資料放在哪（給「設定」頁顯示）。"""
+        """這個程式目前怎麼執行、資料放在哪、關掉網頁後會不會自動結束（給「說明」頁顯示）。"""
         service = os.environ.get("NETSONAR_SERVICE") == "1"
-        return {"mode": "service" if service else "terminal",
+        return {"mode": "service" if service else "terminal", "auto_quit": engine.auto_quit,
+                "quit_after_sec": engine.quit_after,
                 "db_path": str(Path(storage.path).resolve()) if storage.path != ":memory:" else "（記憶體，不保存）",
                 "settings_path": str(sfile.resolve()),
                 "log_path": str(Path.home() / "Library/Logs/NetSonar.log") if service else None,
                 "port": engine.cfg.get("port", 8765)}
 
-    def _guard(body: dict, request: Request) -> None:
-        """🔒 給「停止」「清除」這類不能復原的動作用：只接受從儀表板自己的網頁送來、而且明確確認過的請求。
-        別的網站就算叫你的瀏覽器連過來，來源（Origin）不符也會被拒絕。"""
+    def _same_origin(request: Request) -> None:
+        """🔒 只接受從儀表板自己的網頁送來的請求：別的網站就算叫你的瀏覽器連過來，來源（Origin）不符也會被拒絕。"""
         origin = request.headers.get("origin")
         if origin and origin.split("//")[-1].split(":")[0] not in ("127.0.0.1", "localhost"):
             raise HTTPException(403, "只接受來自本機儀表板的請求")
+
+    def _guard(body: dict, request: Request) -> None:
+        """給「結束」「清除」這類不能復原的動作用：來源要是儀表板自己的網頁，而且要明確確認過。"""
+        _same_origin(request)
         if body.get("confirm") is not True:
             raise HTTPException(400, "需要 confirm: true")
+
+    @app.get("/api/measure")
+    def measure_get():
+        """目前是「量測中」還是「停止量測」（停止時附上畫面停在哪個時間點）。"""
+        return engine.measure_state()
+
+    @app.post("/api/measure")
+    async def measure_set(body: dict, request: Request):
+        """開始或停止量測。body：{"action": "start" 或 "stop"}。
+        定時測試進行中要停止時，要再加上 "finish_test": true（測試會一併結束，報告保存到目前為止）。"""
+        _same_origin(request)
+        action = body.get("action")
+        if action == "start":
+            r = engine.start_measuring()
+        elif action == "stop":
+            if engine.test.get("state") == "running" and body.get("finish_test") is not True:
+                raise HTTPException(409, "定時測試進行中。停止量測會一併結束測試（報告保存到目前為止）。")
+            r = engine.stop_measuring()
+        else:
+            raise HTTPException(400, 'action 必須是 "start" 或 "stop"')
+        return {**engine.measure_state(), **r}
 
     def _csv(text_or_iter, name: str):
         """回傳一個「下載檔案」的回應；檔名附上日期時間，方便分辨是哪一次匯出的。"""
@@ -620,11 +794,18 @@ def create_app(cfg: dict | None = None, storage: Storage | None = None,
         return {"ok": True, "cleared": engine.clear(what)}
 
     @app.post("/api/quit")
-    def quit_app(body: dict, request: Request):
-        """停止 NetSonar（背景量測也會停）。"""
+    async def quit_app(body: dict, request: Request):
+        """結束 NetSonar（程式完全關閉，網頁也就無法使用；要再用請重新打開 NetSonar App）。
+        進行中的定時測試會先結束，報告保存到目前為止，不會白白丟掉。"""
         _guard(body, request)
-        threading.Timer(0.5, app.state.quit).start()      # 稍等一下再關，讓這個回應先送回網頁
-        return {"ok": True}
+        finished = engine.test.get("state") == "running"
+        if finished:
+            engine.finish_test()
+        def bye():
+            engine.stop_streams()      # 先收掉網頁的即時連線，伺服器才不會一直等它們、遲遲關不掉
+            app.state.quit()
+        threading.Timer(0.5, bye).start()                  # 稍等一下再關，讓這個回應先送回網頁
+        return {"ok": True, "test_finished": finished}
 
     @app.get("/api/health")
     def health():
@@ -657,7 +838,7 @@ def create_app(cfg: dict | None = None, storage: Storage | None = None,
         if range not in RANGES:
             raise HTTPException(400, f"range 必須是 {list(RANGES)} 其中之一")
         try:
-            jit = engine.jitter(int(time.time()) - RANGES[range])
+            jit = engine.jitter(engine.ref_time() - RANGES[range])
         except Exception:
             jit = None
         return advice_mod.build(engine.summary(range), engine.diagnosis(range), engine.env or {}, engine.wifi,
@@ -732,7 +913,7 @@ def create_app(cfg: dict | None = None, storage: Storage | None = None,
             raise HTTPException(400, f"range 必須是 {list(RANGES)} 其中之一")
         if target not in [t["name"] for t in engine.targets]:
             raise HTTPException(404, "找不到這個目標")
-        since = int(time.time()) - RANGES[range]
+        since = engine.ref_time() - RANGES[range]          # 停止量測時，停在停止前的資料
         if range in ("5m", "1h"):
             bucket = 1 if range == "5m" else 10
             return {"target": target, "range": range, "bucket_sec": bucket,
@@ -745,7 +926,7 @@ def create_app(cfg: dict | None = None, storage: Storage | None = None,
         """一次取回所有目標的圖表資料（網頁每幾秒更新一次，合併成一個請求比一個目標一個請求輕）。"""
         if range not in RANGES:
             raise HTTPException(400, f"range 必須是 {list(RANGES)} 其中之一")
-        since = int(time.time()) - RANGES[range]
+        since = engine.ref_time() - RANGES[range]
         out = {}
         for t in engine.targets:
             n = t["name"]
@@ -762,7 +943,7 @@ def create_app(cfg: dict | None = None, storage: Storage | None = None,
         if target != "all" and target not in names:
             raise HTTPException(404, "找不到這個目標")
         if since is None:
-            since = int(time.time()) - RANGES[range]
+            since = engine.ref_time() - RANGES[range]
         end = until or 10**12
         chosen = names if target == "all" else [target]
         series = ((n, [(t, r) for t, r in engine.storage.raw_rows(n, since) if t <= end]) for n in chosen)
@@ -800,6 +981,8 @@ def create_app(cfg: dict | None = None, storage: Storage | None = None,
                 raise HTTPException(400, "minutes 必須是 1–720 的整數")
         if engine.test["state"] == "running":
             raise HTTPException(409, "已有測試正在進行")
+        if not engine.measuring:
+            raise HTTPException(409, "量測已停止。請先按「開始量測」，再開始定時測試。")
         label = str(body.get("label", "")).strip()[:40]
         if "<" in label or ">" in label:
             raise HTTPException(400, "標籤不可包含 < >")
@@ -906,6 +1089,7 @@ def create_app(cfg: dict | None = None, storage: Storage | None = None,
                     yield f"data: {json.dumps(item)}\n\n"
             finally:
                 engine.subscribers.discard(q)
+                engine.last_seen = time.monotonic()     # 從網頁關掉的這一刻開始算「關掉多久了」
 
         return StreamingResponse(gen(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache"})
@@ -927,5 +1111,9 @@ def create_app(cfg: dict | None = None, storage: Storage | None = None,
     return app
 
 
-# uvicorn 啟動時會找這個名稱：`uvicorn app:app`
-app = create_app() if os.environ.get("NETPROBE_NO_AUTOAPP") != "1" else None
+# uvicorn 啟動時會找這個名稱：`uvicorn app:app`（serve.py 也是用它）。
+# 正式執行：打開時「不量測」（要在網頁按「開始量測」），關掉網頁約 1 分鐘後自動結束。
+# 進階：環境變數 NETSONAR_START_MEASURING=1 → 一打開就量測；NETSONAR_AUTO_QUIT=0 → 關掉網頁也不自動結束。
+app = (create_app(start_measuring=os.environ.get("NETSONAR_START_MEASURING") == "1",
+                  auto_quit=os.environ.get("NETSONAR_AUTO_QUIT", "1") != "0")
+       if os.environ.get("NETPROBE_NO_AUTOAPP") != "1" else None)
